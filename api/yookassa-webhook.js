@@ -1,6 +1,5 @@
 const axios = require('axios');
 
-const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
@@ -9,7 +8,7 @@ async function sendTelegramMessage(message) {
     console.log('Telegram не настроен');
     return;
   }
-  
+
   try {
     console.log('Отправка уведомления в Telegram...');
     await axios.post(
@@ -29,9 +28,8 @@ async function sendTelegramMessage(message) {
 function formatDeliveries(deliveriesStr) {
   try {
     const deliveries = JSON.parse(deliveriesStr);
-    let result = '';
-    deliveries.forEach((delivery, index) => {
-      result += `
+    return deliveries
+      .map((delivery, index) => `
 <b>Доставка ${index + 1}</b>
 Дата: <b>${delivery.date}</b>
 Событие: <b>${delivery.event}</b>
@@ -39,12 +37,40 @@ function formatDeliveries(deliveriesStr) {
 Телефон: <b>${delivery.recipientPhone}</b>
 Адрес: <b>${delivery.recipientAddress}</b>
 Пожелания: ${delivery.wishes || 'Нет'}
-━━━━━━━━━━━━━━━━━━━━━━━━━`;
-    });
-    return result;
+━━━━━━━━━━━━━━━━━━━━━━━━━`)
+      .join('\n');
   } catch (e) {
+    console.error('Ошибка парсинга доставок:', e.message);
     return 'Ошибка парсинга доставок';
   }
+}
+
+function buildSuccessMessage({ metadata, amount, paymentId, paymentMethod, createdAt, deliveriesInfo }) {
+  return `<b>ПЛАТЁЖ УСПЕШНО ПРОВЕДЁН!</b>
+
+<b>ИНФОРМАЦИЯ О ЗАКАЗЧИКЕ</b>
+Имя: <b>${metadata.customer_name || 'Не указано'}</b>
+Телефон: <b>${metadata.customer_phone || 'Не указан'}</b>
+Email: <b>${metadata.customer_email || 'Не указан'}</b>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>ДЕТАЛИ ПЛАТЕЖА</b>
+Сумма: <b>${amount.value} ${amount.currency}</b>
+ID платежа: <b>${paymentId}</b>
+Номер заказа: <b>${metadata.order_id || 'Нет данных'}</b>
+Способ оплаты: <b>${paymentMethod?.type || 'Неизвестно'}</b>
+Статус: <b>УСПЕШНО ОПЛАЧЕН</b>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>ГРАФИКИ ДОСТАВОК</b>${deliveriesInfo}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Время: <b>${new Date(createdAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}</b>
+
+Заказ готов к обработке!`;
 }
 
 module.exports = async (req, res) => {
@@ -58,7 +84,7 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const { event, object } = req.body;
+    const { event, object } = req.body || {};
 
     if (!event || !object) {
       console.log('Неверный формат webhook');
@@ -67,68 +93,53 @@ module.exports = async (req, res) => {
 
     console.log(`Событие: ${event}, Платёж: ${object.id}`);
 
-    // Обрабатываем только успешные платежи
-    if (event === 'payment.succeeded') {
-      const {
-        id: paymentId,
-        amount,
-        status,
-        metadata,
-        payment_method,
-        created_at
-      } = object;
+    switch (event) {
+      case 'payment.succeeded': {
+        const {
+          id: paymentId,
+          amount = {},
+          metadata = {},
+          payment_method: paymentMethod = {},
+          created_at: createdAt
+        } = object;
 
-      const deliveriesInfo = metadata.deliveries ? formatDeliveries(metadata.deliveries) : '';
-      
-      const message = `<b>ПЛАТЁЖ УСПЕШНО ПРОВЕДЁН!</b>
+        const deliveriesInfo = metadata.deliveries ? formatDeliveries(metadata.deliveries) : '';
+        const message = buildSuccessMessage({
+          metadata,
+          amount,
+          paymentId,
+          paymentMethod,
+          createdAt,
+          deliveriesInfo
+        });
 
-<b>ИНФОРМАЦИЯ О ЗАКАЗЧИКЕ</b>
-Имя: <b>${metadata.customer_name}</b>
-Телефон: <b>${metadata.customer_phone}</b>
-Email: <b>${metadata.customer_email || 'Не указан'}</b>
+        await sendTelegramMessage(message);
+        break;
+      }
+      case 'payment.canceled': {
+        const message = `<b>ПЛАТЁЖ ОТМЕНЁН</b>
 
-━━━━━━━━━━━━━━━━━━━━━━━━━
-
-<b>ДЕТАЛИ ПЛАТЕЖА</b>
-Сумма: <b>${amount.value} ${amount.currency}</b>
-ID платежа: <b>${paymentId}</b>
-Номер заказа: <b>${metadata.order_id}</b>
-Способ оплаты: <b>${payment_method.type}</b>
-Статус: <b>УСПЕШНО ОПЛАЧЕН</b>
-
-━━━━━━━━━━━━━━━━━━━━━━━━━
-
-<b>ГРАФИКИ ДОСТАВОК</b>${deliveriesInfo}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Время: <b>${new Date(created_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}</b>
-
-Заказ готов к обработке!`;
-
-      await sendTelegramMessage(message);
-    }
-
-    if (event === 'payment.canceled') {
-      const message = `<b>ПЛАТЁЖ ОТМЕНЁН</b>
-
-Номер заказа: <b>${object.metadata.order_id}</b>
-Сумма: <b>${object.amount.value} ${object.amount.currency}</b>
+Номер заказа: <b>${object.metadata?.order_id || 'Нет данных'}</b>
+Сумма: <b>${object.amount?.value} ${object.amount?.currency}</b>
 ID платежа: <b>${object.id}</b>
 
 Клиент отменил платёж`;
 
-      await sendTelegramMessage(message);
-    }
-
-    if (event === 'refund.succeeded') {
-      const message = `<b>ВОЗВРАТ СРЕДСТВ ВЫПОЛНЕН</b>
+        await sendTelegramMessage(message);
+        break;
+      }
+      case 'refund.succeeded': {
+        const message = `<b>ВОЗВРАТ СРЕДСТВ ВЫПОЛНЕН</b>
 
 ID платежа: <b>${object.payment_id}</b>
-Сумма возврата: <b>${object.amount.value} ${object.amount.currency}</b>
+Сумма возврата: <b>${object.amount?.value} ${object.amount?.currency}</b>
 ID возврата: <b>${object.id}</b>`;
 
-      await sendTelegramMessage(message);
+        await sendTelegramMessage(message);
+        break;
+      }
+      default:
+        console.log('Необработанный тип события:', event);
     }
 
     res.status(200).send('OK');
